@@ -1,5 +1,4 @@
-# Hoi4 Combat Width Calculator
-
+# Hoi4 Combat Width Estimator
 Install Python 3
 
 Install pip and the requirements with:
@@ -9,3 +8,5 @@ Install pip and the requirements with:
 Use the following command or double click on hoi4cw.pyw
 
 ``` python hoi4cw.py ```
+
+![Alt text](screenshot.png?raw=true "Screenshot")
