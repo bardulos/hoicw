@@ -20,7 +20,7 @@ TERRAIN_CATEGORIES = [
     "Desert", "Forest", "Hills", "Jungle", "Marsh", "Mountain", "Plains", "Urban"
 ]
 ATTACK_DIRECTIONS = [1, 2, 3, 4]
-DEFAULT_ATTACK_WEIGHTS = [30, 40, 20, 10]
+DEFAULT_ATTACK_WEIGHTS = [40, 40, 15, 5]
 BATTLE_WIDTHS = {
     "Desert": [70, 105, 140, 175],
     "Forest": [60, 90, 120, 150],
@@ -34,10 +34,18 @@ BATTLE_WIDTHS = {
 MAX_DIVISION_WIDTH = 40
 DEFENSIVE_DIVISIONS = 3
 OFFENSIVE_DIVISIONS = 2
+WATER_TERRAIN_TOKENS = ("sea", "ocean", "lake", "water", "coast", "river")
 
 
-def calculate_profile_scores(terrain_counts, attack_weights):
-    """Return integer widths and weighted frontage-fit scores for both roles."""
+def is_water_terrain(raw_terrain):
+    terrain = str(raw_terrain or "").lower()
+    return any(token in terrain for token in WATER_TERRAIN_TOKENS)
+
+
+def calculate_profile_scores(terrain_counts, attack_weights, objective="average"):
+    """Return frontage-fit scores using the selected outcome objective."""
+    if objective not in ("average", "worst", "balanced"):
+        raise ValueError(f"Unknown outcome objective: {objective}")
     weight_values = np.asarray(attack_weights, dtype=float)
     weight_total = weight_values.sum()
     if weight_total <= 0:
@@ -77,13 +85,22 @@ def calculate_profile_scores(terrain_counts, attack_weights):
         excess_ratio = np.maximum(frontage_ratio - 1.0, 0.0)
         overwidth_penalty = np.minimum(1.5 * excess_ratio, 0.33)
         scores = participation * filled_frontage * (1.0 - overwidth_penalty)
-        return scores @ scenario_weights
+        average_scores = scores @ scenario_weights
+        if objective == "average":
+            return average_scores
+        active_scenarios = scenario_weights > 0
+        worst_scores = np.min(scores[:, active_scenarios], axis=1)
+        if objective == "worst":
+            return worst_scores
+        return np.sqrt(np.maximum(average_scores, 0.0) * np.maximum(worst_scores, 0.0))
 
     return widths, profile(DEFENSIVE_DIVISIONS), profile(OFFENSIVE_DIVISIONS)
 
 
-def calculate_weight_sweep(terrain_counts, values=range(20, 81, 5)):
-    """Evaluate every independent four-slider combination and summarize its score curves."""
+def calculate_weight_sweep(terrain_counts, values=range(0, 101, 10), objective="average"):
+    """Evaluate every 10%-step four-way distribution whose normalized weights sum to 100%."""
+    if objective not in ("average", "worst", "balanced"):
+        raise ValueError(f"Unknown outcome objective: {objective}")
     province_counts = np.asarray(
         [max(0, int(terrain_counts.get(terrain, 0))) for terrain in TERRAIN_CATEGORIES],
         dtype=float,
@@ -92,8 +109,9 @@ def calculate_weight_sweep(terrain_counts, values=range(20, 81, 5)):
     if total_provinces <= 0:
         raise ValueError("Enter at least one recognized land province before running the sweep.")
 
-    combinations = np.asarray(list(product(values, repeat=4)), dtype=float)
-    normalized_directions = combinations / combinations.sum(axis=1, keepdims=True)
+    candidates = np.asarray(list(product(values, repeat=4)), dtype=int)
+    combinations = candidates[candidates.sum(axis=1) == 100].astype(float)
+    normalized_directions = combinations / 100.0
     scenario_weights = np.concatenate(
         [normalized_directions * count for count in province_counts], axis=1
     ) / total_provinces
@@ -123,8 +141,24 @@ def calculate_weight_sweep(terrain_counts, values=range(20, 81, 5)):
         overwidth_penalty = np.minimum(1.5 * excess_ratio, 0.33)
         return (participation * filled_frontage * (1.0 - overwidth_penalty)).T
 
-    defensive_scores = scenario_weights @ scenario_score_matrix(DEFENSIVE_DIVISIONS)
-    offensive_scores = scenario_weights @ scenario_score_matrix(OFFENSIVE_DIVISIONS)
+    defensive_scenario_scores = scenario_score_matrix(DEFENSIVE_DIVISIONS)
+    offensive_scenario_scores = scenario_score_matrix(OFFENSIVE_DIVISIONS)
+    active_scenarios = scenario_weights > 0
+
+    def aggregate_outcomes(scenario_scores):
+        average_scores = scenario_weights @ scenario_scores
+        if objective == "average":
+            return average_scores
+        worst_scores = np.min(
+            np.where(active_scenarios[:, :, None], scenario_scores[None, :, :], np.inf),
+            axis=1,
+        )
+        if objective == "worst":
+            return worst_scores
+        return np.sqrt(np.maximum(average_scores, 0.0) * np.maximum(worst_scores, 0.0))
+
+    defensive_scores = aggregate_outcomes(defensive_scenario_scores)
+    offensive_scores = aggregate_outcomes(offensive_scenario_scores)
     defensive_best = widths[np.argmax(defensive_scores, axis=1)]
     offensive_best = widths[np.argmax(offensive_scores, axis=1)]
 
@@ -271,7 +305,9 @@ class CombatWidthGUI:
         self.attack_weight_vars = []
         self.last_attack_weights = list(DEFAULT_ATTACK_WEIGHTS)
         self._syncing_attack_sliders = False
+        self.objective_var = tk.StringVar(value="average")
         self.sweep_signature = None
+        self.objective_var.trace_add("write", self._on_objective_changed)
 
         root.title("HOI4 Combat Width Estimator")
         root.geometry("1880x820")
@@ -292,6 +328,7 @@ class CombatWidthGUI:
         self._build_area_controls()
         self._build_terrain_controls()
         self._build_attack_controls()
+        self._build_objective_controls()
         self._build_chart()
         self._update_area_choices()
         self._refresh_chart()
@@ -379,6 +416,33 @@ class CombatWidthGUI:
             )
             scale.grid(row=row, column=1, sticky="ew")
 
+    def _build_objective_controls(self):
+        objective_frame = ttk.LabelFrame(self.control_panel, text="Outcome objective", padding=8)
+        objective_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        ttk.Radiobutton(
+            objective_frame,
+            text="Maximize average outcome",
+            value="average",
+            variable=self.objective_var,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            objective_frame,
+            text="Minimize worst-case loss",
+            value="worst",
+            variable=self.objective_var,
+        ).grid(row=1, column=0, sticky="w")
+        ttk.Radiobutton(
+            objective_frame,
+            text="Balanced",
+            value="balanced",
+            variable=self.objective_var,
+        ).grid(row=2, column=0, sticky="w")
+
+    def _on_objective_changed(self, *_trace_args):
+        self.sweep_signature = None
+        self._refresh_chart()
+        self._refresh_sweep()
+
     def _build_chart(self):
         self.current_box = ttk.LabelFrame(self.chart_panel, text="Current slider mix", padding=4)
         self.current_box.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
@@ -388,9 +452,7 @@ class CombatWidthGUI:
         self.current_box.rowconfigure(0, weight=1)
         self.current_box.columnconfigure(0, weight=1)
 
-        self.sweep_box = ttk.LabelFrame(
-            self.chart_panel, text="Full attack-weight sweep (20–80%, 5% steps)", padding=4
-        )
+        self.sweep_box = ttk.LabelFrame(self.chart_panel, text="", padding=4)
         self.sweep_box.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         self.sweep_box.rowconfigure(0, weight=1)
         self.sweep_box.columnconfigure(0, weight=1)
@@ -398,12 +460,28 @@ class CombatWidthGUI:
         self.sweep_canvas = FigureCanvasTkAgg(self.sweep_figure, master=self.sweep_box)
         self.sweep_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
+    def _is_land_dominant_region(self, area):
+        land_provinces = 0
+        water_provinces = 0
+        province_data = self.data.get("provinces", {})
+        for province_id in area.get("province_ids", []):
+            record = province_data.get(str(province_id), {})
+            if is_water_terrain(record.get("raw_terrain")):
+                water_provinces += 1
+            elif record.get("category") in TERRAIN_CATEGORIES:
+                land_provinces += 1
+        return land_provinces > water_provinces
+
     def _area_mapping(self):
         source = self.source_var.get()
         if source == "Continent":
             return self.data.get("continents", {})
         if source == "Strategic region":
-            return self.data.get("regions", {})
+            return {
+                name: area
+                for name, area in self.data.get("regions", {}).items()
+                if self._is_land_dominant_region(area)
+            }
         if source == "Country":
             return {
                 name: area
@@ -417,7 +495,11 @@ class CombatWidthGUI:
         names = sorted(areas)
         self.area_combo.configure(values=names, state="readonly" if names else "disabled")
         if names:
-            self.area_var.set(names[0])
+            default_area = next(
+                (name for name in names if self.source_var.get() == "Continent" and name.casefold() == "europe"),
+                names[0],
+            )
+            self.area_var.set(default_area)
             self._load_selected_area()
         else:
             self.area_var.set("")
@@ -454,12 +536,21 @@ class CombatWidthGUI:
         self._refresh_sweep()
 
     def _refresh_sweep(self):
-        signature = tuple(int(self.counts.get(category, 0)) for category in TERRAIN_CATEGORIES)
+        signature = (
+            self.objective_var.get(),
+            tuple(int(self.counts.get(category, 0)) for category in TERRAIN_CATEGORIES),
+        )
         if signature == self.sweep_signature:
             return
 
+        objective_label = {
+            "average": "weighted average",
+            "worst": "worst-case maximin",
+            "balanced": "balanced geometric mean",
+        }[self.objective_var.get()]
+
         try:
-            result = calculate_weight_sweep(self.counts)
+            result = calculate_weight_sweep(self.counts, objective=self.objective_var.get())
         except ValueError as error:
             self.sweep_axes.clear()
             self.sweep_axes.set_title(str(error))
@@ -473,6 +564,7 @@ class CombatWidthGUI:
         widths = result["widths"]
         axes = self.sweep_axes
         axes.clear()
+        axes.set_title(f"Attack-Weight Sweep — {objective_label.title()}")
         for scores, color, name in (
             (result["defensive_scores"], "C0", "Defense"),
             (result["offensive_scores"], "C1", "Offense"),
@@ -492,12 +584,19 @@ class CombatWidthGUI:
             axes.fill_between(widths, p25, p75, color=color, alpha=0.14, linewidth=0, label="_nolegend_")
             shade_interval_under_curve(axes, widths, median, peak_interval, color, alpha=0.12)
             best_widths = defensive_best if name == "Defense" else offensive_best
+            aggregate_label = {
+                "average": "average",
+                "worst": "worst-case",
+                "balanced": "balanced geometric",
+            }[self.objective_var.get()]
             axes.plot(
                 widths,
                 median,
                 color=color,
                 linewidth=2,
-                label=f"{name} median; best width {best_widths['minimum']}-{best_widths['maximum']}w",
+                zorder=3,
+                label=(f"{name} {aggregate_label} median; "
+                       f"best width {best_widths['minimum']}-{best_widths['maximum']}w"),
             )
 
         axes.set_xlabel("Width of Each Division")
@@ -506,9 +605,11 @@ class CombatWidthGUI:
         axes.set_ylim(0, 1.05)
         axes.set_xticks(np.arange(0, MAX_DIVISION_WIDTH + 1, 2))
         axes.xaxis.set_minor_locator(plt.MultipleLocator(1))
+        axes.tick_params(axis="x", which="both", top=False, labeltop=False)
+        axes.spines["top"].set_visible(True)
         axes.grid(True, which="both", linestyle="--", linewidth=0.5)
         axes.legend(loc="upper left", fontsize=9, framealpha=0.92)
-        self.sweep_canvas.draw_idle()
+        self.sweep_canvas.draw()
 
     def _on_terrain_selected(self, _event=None):
         selection = self.terrain_tree.selection()
@@ -567,7 +668,9 @@ class CombatWidthGUI:
             return
 
         try:
-            widths, defensive_scores, offensive_scores = calculate_profile_scores(self.counts, raw_weights)
+            widths, defensive_scores, offensive_scores = calculate_profile_scores(
+                self.counts, raw_weights, objective=self.objective_var.get()
+            )
         except ValueError as error:
             self.axes.clear()
             self.axes.set_title("Set a terrain mix to calculate widths")
@@ -601,14 +704,20 @@ class CombatWidthGUI:
         shade_interval_under_curve(self.axes, widths, defensive_scores, defensive, defensive_color)
         shade_interval_under_curve(self.axes, widths, offensive_scores, offensive, offensive_color)
 
-        self.axes.set_title("Estimated Combat Width Fit by Role")
+        objective_label = {
+            "average": "Weighted Average",
+            "worst": "Worst-Case Maximin",
+            "balanced": "Balanced Geometric Mean",
+        }[self.objective_var.get()]
+        self.axes.set_title(f"Estimated Combat Width Fit — {objective_label}")
         self.axes.set_xlabel("Width of Each Division")
         self.axes.set_ylabel("Weighted Frontage-Fit Score")
         self.axes.set_xlim(0, MAX_DIVISION_WIDTH)
         self.axes.set_ylim(0, 1.05)
         self.axes.set_xticks(np.arange(0, MAX_DIVISION_WIDTH + 1, 2))
         self.axes.xaxis.set_minor_locator(plt.MultipleLocator(1))
-        self.axes.tick_params(axis="x", which="both", top=True, labeltop=False)
+        self.axes.tick_params(axis="x", which="both", top=False, labeltop=False)
+        self.axes.spines["top"].set_visible(True)
         self.axes.grid(True, which="both", linestyle="--", linewidth=0.5)
         self.axes.legend(
             handles=[defensive_line, offensive_line],
