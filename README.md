@@ -5,7 +5,7 @@ Install pip and the requirements with:
 
 ``` python -m pip install -r requirements.txt ```
 
-Use the following command or double click on hoi4cw.pyw
+Double click on clickme.pyw or use the following command
 
 ``` python hoi4cw.py ```
 
