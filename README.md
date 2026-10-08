@@ -9,4 +9,4 @@ Double click on ```clickme.pyw``` or use the following command
 
 ``` python hoi4cw.py ```
 
-![Alt text](screenshot.png?raw=true "Screenshot")
+![](https://raw.githubusercontent.com/bardulos/hoicw/refs/heads/media/screenshot.jpg?token=GHSAT0AAAAAAEJ2PRJDYBJCVUCPTDJLPE7Q2WHKFKQ)
